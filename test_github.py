@@ -1,7 +1,7 @@
 import requests
 
 # Replace with your token and repo
-token = "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"  # or leave empty if repo is public
+token = ""  # or leave empty if repo is public
 repo = "fearless-lila/analytics-implementation-copilot"
 query = "basketSort.md"  # a file or keyword you know exists
 
