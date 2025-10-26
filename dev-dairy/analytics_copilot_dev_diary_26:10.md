@@ -101,6 +101,12 @@ Secret key not working once push the change to github, so need to get manully fr
   4. Feed docs + chat history into BLOOMZ.  
   5. Generate an answer.  
 
+
+
+[FlowChart](https://github.com/fearless-lila/analytics-implementation-copilot/blob/main/img/rag_flow_chart.png)
+
+
+
 **Learned:**  
 - A clear diagram helps document architecture for teammates or future reference.  
 
