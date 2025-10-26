@@ -1,8 +1,8 @@
 import requests
 
-token = "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"
+token = "" # need to get this from notes
 repo = "fearless-lila/analytics-implementation-copilot"
-query = "trexProductModule.md"
+query = "basketSort.md"
 
 headers = {"Authorization": f"token {token}"} if token else {}
 
