@@ -1,24 +1,24 @@
-
-
 import requests
 
-# Replace with your token and repo
-token = ""  # or leave empty if repo is public
+token = "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"
 repo = "fearless-lila/analytics-implementation-copilot"
-query = "basketSort.md"  # a file or keyword you know exists
+query = "trexProductModule.md"
 
-url = f"https://api.github.com/search/code?q={query}+repo:{repo}"
 headers = {"Authorization": f"token {token}"} if token else {}
 
-response = requests.get(url, headers=headers)
+# 1️⃣ Search by filename
+url_filename = f"https://api.github.com/search/code?q=filename:{query}+repo:{repo}"
+r1 = requests.get(url_filename, headers=headers)
+results = r1.json().get("items", [])
+print(f"Filename search: {len(results)} results")
 
-print("HTTP status code:", response.status_code)
-if response.status_code != 200:
-    print("Error:", response.text)
-else:
-    results = response.json().get("items", [])
-    print(f"Number of results found: {len(results)}")
-    for item in results[:5]:
-        print(f"{item['name']} - {item['html_url']}")
+# 2️⃣ If none found, search by content
+if not results:
+    url_content = f"https://api.github.com/search/code?q={query}+repo:{repo}"
+    r2 = requests.get(url_content, headers=headers)
+    results = r2.json().get("items", [])
+    print(f"Content search: {len(results)} results")
 
-
+# 3️⃣ Display results
+for item in results[:5]:
+    print(f"{item['name']} - {item['html_url']}")
