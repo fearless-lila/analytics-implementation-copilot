@@ -2,7 +2,7 @@ import requests
 
 token = "" # need to get this from notes
 repo = "fearless-lila/analytics-implementation-copilot"
-query = "basketSort.md"
+query = "basketSort"
 
 headers = {"Authorization": f"token {token}"} if token else {}
 

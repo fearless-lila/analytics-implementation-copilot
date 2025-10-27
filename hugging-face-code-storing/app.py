@@ -1,116 +1,176 @@
+# =============================================
+#  Analytics Copilot (RAG + Llama 3 8B 4-bit)
+#  Optimized for NVIDIA T4 GPUs with caching
+# =============================================
+
 import os
+import base64
+import json
+import torch
 import requests
 import gradio as gr
 from sentence_transformers import SentenceTransformer, util
 from transformers import pipeline
 
-# -------------------------------
-# Load AI models
-# -------------------------------
-# Semantic search for documents
-search_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+# ---------------------------------------------
+# 🔐 1. Load tokens
+# ---------------------------------------------
+HF_TOKEN = os.environ.get("HF_TOKEN")           # Hugging Face access token
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")   # GitHub token (optional for public repos)
 
-# LLM for human-like chat and answering questions
+# ---------------------------------------------
+# ⚙️ 2. Initialize embedding model
+# ---------------------------------------------
+embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
+device = 0 if torch.cuda.is_available() else "cpu"
+print(f"✅ Using device: {'GPU' if device == 0 else 'CPU'}")
+
+# ---------------------------------------------
+# 🧠 3. Load chat model (Llama 3 8B 4-bit)
+# ---------------------------------------------
+model_name = "meta-llama/Meta-Llama-3-8B-Instruct-4bit"
+print(f"🚀 Using {model_name}")
+
 chat_model = pipeline(
     "text-generation",
-    model="bigscience/bloomz-560m",
-    tokenizer="bigscience/bloomz-560m"
+    model=model_name,
+    token=HF_TOKEN,
+    device=device,
+    dtype="auto"
 )
 
-# -------------------------------
-# Fetch GitHub files with URLs and content
-# -------------------------------
+# ---------------------------------------------
+# 📂 4. Fetch files from GitHub
+# ---------------------------------------------
 def fetch_github_files(repo="fearless-lila/analytics-implementation-copilot", token=None):
+    """Fetch text-based files from a GitHub repository."""
     headers = {"Authorization": f"token {token}"} if token else {}
     url = f"https://api.github.com/repos/{repo}/git/trees/main?recursive=1"
     r = requests.get(url, headers=headers)
     if r.status_code != 200:
-        print("Error fetching file list:", r.text)
+        print("❌ Error fetching file list:", r.text)
         return []
 
     files = []
     for item in r.json().get("tree", []):
-        if item["type"] == "blob":
-            path = item["path"]
-            github_url = f"https://github.com/{repo}/blob/main/{path}"
-
-            # Fetch content
-            raw_url = f"https://raw.githubusercontent.com/{repo}/main/{path}"
-            content_r = requests.get(raw_url, headers=headers)
-            content = content_r.text if content_r.status_code == 200 else ""
-            files.append({"path": path, "url": github_url, "content": content})
+        if item["type"] != "blob":
+            continue
+        path = item["path"]
+        # Filter text-like files
+        if any(path.lower().endswith(ext) for ext in [".py", ".md", ".txt", ".yaml", ".yml", ".json"]):
+            content_url = f"https://api.github.com/repos/{repo}/contents/{path}"
+            resp = requests.get(content_url, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "content" in data:
+                    content = base64.b64decode(data["content"]).decode("utf-8", errors="ignore")
+                    files.append({
+                        "path": path,
+                        "url": f"https://github.com/{repo}/blob/main/{path}",
+                        "content": content
+                    })
+    print(f"✅ Loaded {len(files)} files from {repo}")
     return files
 
-# -------------------------------
-# Prepare embeddings for GitHub files
-# -------------------------------
-def prepare_file_embeddings(files):
-    paths = [f["path"] for f in files]
-    contents = [f["content"] for f in files]
-    embeddings = search_model.encode(contents, convert_to_tensor=True)
-    return embeddings
+# ---------------------------------------------
+# 💾 5. Cache embeddings
+# ---------------------------------------------
+CACHE_DIR = "cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+EMB_PATH = os.path.join(CACHE_DIR, "embeddings.pt")
+FILES_PATH = os.path.join(CACHE_DIR, "files.json")
 
-# -------------------------------
-# RAG search: retrieve top file contents based on query
-# -------------------------------
-def retrieve_top_docs(query, files, embeddings, top_k=3):
-    query_emb = search_model.encode(query, convert_to_tensor=True)
-    similarities = util.cos_sim(query_emb, embeddings)[0]
-    top_results = similarities.topk(top_k)
-    top_docs = []
-    for score, idx in zip(top_results.values, top_results.indices):
+def prepare_embeddings(files):
+    """Generate or load cached embeddings for GitHub files."""
+    if os.path.exists(EMB_PATH) and os.path.exists(FILES_PATH):
+        print("💾 Loading cached embeddings...")
+        embeddings = torch.load(EMB_PATH)
+        with open(FILES_PATH, "r") as f:
+            cached_files = json.load(f)
+        if len(cached_files) == len(files):
+            print("✅ Using cached embeddings.")
+            return cached_files, embeddings
+        else:
+            print("⚠️ Repo changed — regenerating embeddings.")
+
+    print("🧮 Generating new embeddings...")
+    valid_files = [f for f in files if f["content"].strip()]
+    texts = [f["content"] for f in valid_files]
+    embeddings = embedder.encode(texts, convert_to_tensor=True)
+
+    torch.save(embeddings, EMB_PATH)
+    with open(FILES_PATH, "w") as f:
+        json.dump(valid_files, f)
+
+    print(f"✅ Cached {len(valid_files)} embeddings.")
+    return valid_files, embeddings
+
+# ---------------------------------------------
+# 🔍 6. Retrieve top docs for RAG
+# ---------------------------------------------
+def retrieve_top_docs(query, files, embeddings, top_k=2):
+    """Return top-K relevant file snippets for the query."""
+    q_emb = embedder.encode(query, convert_to_tensor=True)
+    sims = util.cos_sim(q_emb, embeddings)[0]
+    best = sims.topk(top_k)
+    docs = []
+    for score, idx in zip(best.values, best.indices):
         f = files[idx]
-        top_docs.append(f"File: {f['path']} — {f['url']}\n{f['content'][:500]}...")  # first 500 chars
-    return top_docs
+        snippet = f["content"][:300].replace("\n", " ")
+        docs.append(f"File: {f['path']} — {f['url']}\n{snippet}...")
+    return "\n\n".join(docs)
 
-# -------------------------------
-# Conversational AI response with RAG
-# -------------------------------
-conversation_history = []
+# ---------------------------------------------
+# 💬 7. RAG-powered chat
+# ---------------------------------------------
+def rag_answer(user_msg, history, files, embeddings):
+    context = retrieve_top_docs(user_msg, files, embeddings, top_k=2)
+    prompt = f"""
+You are an analytics assistant. Use the following project files to answer the user's question.
+Be concise, factual, and avoid guessing.
 
-def rag_conversational_response(message, files, embeddings):
-    global conversation_history
-    conversation_history.append(f"User: {message}")
+Context:
+{context}
 
-    # Retrieve top docs
-    top_docs = retrieve_top_docs(message, files, embeddings, top_k=3)
-    docs_text = "\n\n".join(top_docs)
+Conversation:
+{history[-5:]}
 
-    # Build prompt
-    prompt = "\n".join(conversation_history[-10:]) + "\nRelevant Docs:\n" + docs_text + "\nAI:"
-    response = chat_model(prompt, max_length=300, do_sample=True, temperature=0.7)[0]["generated_text"]
+User: {user_msg}
+AI:"""
 
-    ai_reply = response[len(prompt):].strip()
-    conversation_history.append(f"AI: {ai_reply}")
-    return ai_reply
+    out = chat_model(
+        prompt,
+        max_new_tokens=150,
+        temperature=0.4,
+        do_sample=True
+    )[0]["generated_text"]
+    reply = out.split("AI:")[-1].strip()
+    return reply
 
-# -------------------------------
-# Handle query
-# -------------------------------
-# Preload files and embeddings once at startup
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-files = fetch_github_files(token=GITHUB_TOKEN)
-embeddings = prepare_file_embeddings(files)
-
-def handle_query(message):
-    # Simple heuristic: if it contains "document" keywords, do RAG
-    doc_keywords = ["document", "repo", "file", "spec", "tracking", "analytics"]
-    if any(word in message.lower() for word in doc_keywords):
-        return rag_conversational_response(message, files, embeddings)
-    else:
-        # General conversation without RAG
-        conversation_history.append(f"User: {message}")
-        prompt = "\n".join(conversation_history[-10:]) + "\nAI:"
-        response = chat_model(prompt, max_length=150, do_sample=True, temperature=0.7)[0]["generated_text"]
-        ai_reply = response[len(prompt):].strip()
-        conversation_history.append(f"AI: {ai_reply}")
-        return ai_reply
-
-# -------------------------------
-# Gradio Chat Interface
-# -------------------------------
+# ---------------------------------------------
+# 🗨️ 8. Gradio Chat Interface
+# ---------------------------------------------
 def chat_fn(message, history):
-    response = handle_query(message)
-    return response
+    if not files or embeddings is None or len(embeddings) == 0:
+        return "⚠️ No documents loaded from GitHub."
+    reply = rag_answer(message, history, files, embeddings)
+    history.append((message, reply))
+    return history, history
 
-gr.ChatInterface(fn=chat_fn, title="Analytics Copilot (RAG + BLOOMZ Chat)").launch()
+# ---------------------------------------------
+# 🚀 9. Load repo, build cache & launch app
+# ---------------------------------------------
+repo_name = "fearless-lila/analytics-implementation-copilot"
+
+files = fetch_github_files(repo=repo_name, token=GITHUB_TOKEN)
+files, embeddings = prepare_embeddings(files)
+print(f"✅ Ready with {len(files)} files indexed for RAG.")
+
+gr.ChatInterface(
+    fn=chat_fn,
+    title="Analytics Copilot — Llama 3 8B 4-bit RAG",
+    description="Ask questions about analytics specs or files in your GitHub repo.",
+    theme="soft",
+    type="messages"
+).launch()
